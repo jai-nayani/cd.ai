@@ -1,21 +1,41 @@
-"""3-stage LLM Council orchestration."""
+"""3-stage LLM Council orchestration with RAG support."""
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from .openrouter import query_models_parallel, query_model
-from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+from .config import COUNCIL_MODELS, CHAIRMAN_MODEL, RAG_ENABLED
 
 
-async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
+async def stage1_collect_responses(
+    user_query: str,
+    retrieved_knowledge: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
     """
     Stage 1: Collect individual responses from all council models.
 
     Args:
         user_query: The user's question
+        retrieved_knowledge: Optional RAG context from vector DB
 
     Returns:
         List of dicts with 'model' and 'response' keys
     """
-    messages = [{"role": "user", "content": user_query}]
+    if RAG_ENABLED and retrieved_knowledge:
+        rag_context = "\n\n".join([
+            f"[Previous knowledge (consensus score: {k['consensus_score']:.2f}, supported by {k['support_count']} model(s))]:\n{k['text']}"
+            for k in retrieved_knowledge[:5]
+        ])
+        
+        enhanced_query = f"""You are part of a council of AI experts. Below is relevant knowledge from previous deliberations:
+
+{rag_context}
+
+Current question: {user_query}
+
+Please provide your answer, building upon or refining the previous knowledge where relevant. If the previous knowledge is not applicable, answer the question directly."""
+        
+        messages = [{"role": "user", "content": enhanced_query}]
+    else:
+        messages = [{"role": "user", "content": user_query}]
 
     # Query all models in parallel
     responses = await query_models_parallel(COUNCIL_MODELS, messages)
@@ -293,18 +313,34 @@ Title:"""
     return title
 
 
-async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
+async def run_full_council(
+    user_query: str,
+    conversation_id: str
+) -> Tuple[List, List, Dict, Dict]:
     """
-    Run the complete 3-stage council process.
+    Run the complete 3-stage council process with RAG.
 
     Args:
         user_query: The user's question
+        conversation_id: ID of the conversation
 
     Returns:
         Tuple of (stage1_results, stage2_results, stage3_result, metadata)
     """
-    # Stage 1: Collect individual responses
-    stage1_results = await stage1_collect_responses(user_query)
+    retrieved_knowledge = []
+    rag_metrics = {}
+    
+    if RAG_ENABLED:
+        from .vectordb import vector_db
+        from .knowledge import extract_knowledge_units
+        from .deduplication import deduplicate_and_store, calculate_consensus_info
+        
+        retrieved_knowledge = vector_db.retrieve(user_query)
+        rag_metrics['retrieved_count'] = len(retrieved_knowledge)
+        rag_metrics['consensus_info'] = calculate_consensus_info(retrieved_knowledge)
+    
+    # Stage 1: Collect individual responses (with RAG context if available)
+    stage1_results = await stage1_collect_responses(user_query, retrieved_knowledge)
 
     # If no models responded successfully, return error
     if not stage1_results:
@@ -325,11 +361,27 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
         stage1_results,
         stage2_results
     )
+    
+    if RAG_ENABLED:
+        from .knowledge import extract_knowledge_units
+        from .deduplication import deduplicate_and_store
+        
+        knowledge_units = extract_knowledge_units(
+            stage1_results,
+            user_query,
+            conversation_id
+        )
+        
+        dedup_metrics, stored_ids = await deduplicate_and_store(knowledge_units)
+        
+        rag_metrics['deduplication'] = dedup_metrics.to_dict()
+        rag_metrics['stored_ids'] = stored_ids
 
     # Prepare metadata
     metadata = {
         "label_to_model": label_to_model,
-        "aggregate_rankings": aggregate_rankings
+        "aggregate_rankings": aggregate_rankings,
+        "rag": rag_metrics if RAG_ENABLED else None
     }
 
     return stage1_results, stage2_results, stage3_result, metadata
