@@ -182,28 +182,39 @@ def extract_knowledge_units(
     knowledge_units = []
     
     for model_resp in model_responses:
-        model_name = model_resp['model']
-        response_text = model_resp['response']
-        
-        chunks = smart_chunk(response_text)
-        
-        for chunk in chunks:
-            chunk_text = chunk['text']
+        try:
+            model_name = model_resp.get('model', 'unknown')
+            response_text = model_resp.get('response', '')
             
-            if len(chunk_text.split()) < 10:
+            if not response_text or not response_text.strip():
                 continue
             
-            text_hash = compute_text_hash(chunk_text)
+            chunks = smart_chunk(response_text)
             
-            knowledge_units.append({
-                'text': chunk_text,
-                'normalized_text': normalize_text(chunk_text),
-                'hash': text_hash,
-                'source_model': model_name,
-                'query_context': user_query,
-                'conversation_id': conversation_id,
-                'chunk_type': chunk['type'],
-                'metadata': chunk['metadata']
-            })
+            for chunk in chunks:
+                try:
+                    chunk_text = chunk.get('text', '').strip()
+                    
+                    if len(chunk_text.split()) < 10:
+                        continue
+                    
+                    text_hash = compute_text_hash(chunk_text)
+                    
+                    knowledge_units.append({
+                        'text': chunk_text,
+                        'normalized_text': normalize_text(chunk_text),
+                        'hash': text_hash,
+                        'source_model': model_name,
+                        'query_context': user_query,
+                        'conversation_id': conversation_id,
+                        'chunk_type': chunk.get('type', 'text'),
+                        'metadata': chunk.get('metadata', {})
+                    })
+                except Exception as e:
+                    print(f"ERROR: Failed to extract chunk from response: {e}")
+                    continue
+        except Exception as e:
+            print(f"ERROR: Failed to extract knowledge units from model {model_resp.get('model', 'unknown')}: {e}")
+            continue
     
     return knowledge_units

@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -20,7 +21,7 @@ def get_conversation_path(conversation_id: str) -> str:
 
 def create_conversation(conversation_id: str) -> Dict[str, Any]:
     """
-    Create a new conversation.
+    Create a new conversation with atomic write.
 
     Args:
         conversation_id: Unique identifier for the conversation
@@ -37,10 +38,26 @@ def create_conversation(conversation_id: str) -> Dict[str, Any]:
         "messages": []
     }
 
-    # Save to file
-    path = get_conversation_path(conversation_id)
-    with open(path, 'w') as f:
-        json.dump(conversation, f, indent=2)
+    try:
+        path = get_conversation_path(conversation_id)
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            dir=DATA_DIR,
+            delete=False,
+            suffix='.json'
+        ) as tmp_file:
+            json.dump(conversation, tmp_file, indent=2)
+            tmp_path = tmp_file.name
+        
+        os.replace(tmp_path, path)
+    except Exception as e:
+        print(f"ERROR: Failed to create conversation {conversation_id}: {e}")
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        raise
 
     return conversation
 
@@ -66,7 +83,7 @@ def get_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
 
 def save_conversation(conversation: Dict[str, Any]):
     """
-    Save a conversation to storage.
+    Save a conversation to storage with atomic write.
 
     Args:
         conversation: Conversation dict to save
@@ -74,8 +91,26 @@ def save_conversation(conversation: Dict[str, Any]):
     ensure_data_dir()
 
     path = get_conversation_path(conversation['id'])
-    with open(path, 'w') as f:
-        json.dump(conversation, f, indent=2)
+    
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            dir=DATA_DIR,
+            delete=False,
+            suffix='.json'
+        ) as tmp_file:
+            json.dump(conversation, tmp_file, indent=2)
+            tmp_path = tmp_file.name
+        
+        os.replace(tmp_path, path)
+    except Exception as e:
+        print(f"ERROR: Failed to save conversation {conversation['id']}: {e}")
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        raise
 
 
 def list_conversations() -> List[Dict[str, Any]]:

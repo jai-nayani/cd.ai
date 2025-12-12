@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 
-from .config import VECTOR_DB_DIR, TOP_K_RETRIEVAL, CONSENSUS_WEIGHT
+from .config import VECTOR_DB_DIR, TOP_K_RETRIEVAL, CONSENSUS_WEIGHT, COUNCIL_MODELS
 from .embedding import embedding_service
 
 
@@ -16,23 +16,27 @@ class VectorDatabase:
     
     def __init__(self):
         """Initialize ChromaDB client."""
-        Path(VECTOR_DB_DIR).mkdir(parents=True, exist_ok=True)
-        
-        self.client = chromadb.PersistentClient(
-            path=VECTOR_DB_DIR,
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
+        try:
+            Path(VECTOR_DB_DIR).mkdir(parents=True, exist_ok=True)
+            
+            self.client = chromadb.PersistentClient(
+                path=VECTOR_DB_DIR,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                )
             )
-        )
-        
-        self.collection = self.client.get_or_create_collection(
-            name="knowledge_units",
-            metadata={"hnsw:space": "cosine"}
-        )
-        
-        print(f"Vector database initialized at {VECTOR_DB_DIR}")
-        print(f"Current knowledge units: {self.collection.count()}")
+            
+            self.collection = self.client.get_or_create_collection(
+                name="knowledge_units",
+                metadata={"hnsw:space": "cosine"}
+            )
+            
+            print(f"Vector database initialized at {VECTOR_DB_DIR}")
+            print(f"Current knowledge units: {self.collection.count()}")
+        except Exception as e:
+            print(f"ERROR: Failed to initialize vector database: {e}")
+            raise RuntimeError(f"Vector database initialization failed: {e}") from e
     
     def check_exact_duplicate(self, text_hash: str) -> bool:
         """
@@ -100,28 +104,35 @@ class VectorDatabase:
         Returns:
             ID of stored knowledge unit
         """
-        unit_id = f"{knowledge_unit['conversation_id']}_{knowledge_unit['hash'][:16]}"
-        
-        metadata = {
-            'hash': knowledge_unit['hash'],
-            'source_models': json.dumps([knowledge_unit['source_model']]),
-            'support_count': 1,
-            'consensus_score': 0.25,
-            'query_context': knowledge_unit['query_context'],
-            'conversation_id': knowledge_unit['conversation_id'],
-            'chunk_type': knowledge_unit['chunk_type'],
-            'created_at': datetime.utcnow().isoformat(),
-            'updated_at': datetime.utcnow().isoformat()
-        }
-        
-        self.collection.add(
-            ids=[unit_id],
-            documents=[knowledge_unit['text']],
-            embeddings=[embedding],
-            metadatas=[metadata]
-        )
-        
-        return unit_id
+        try:
+            max_models = len(COUNCIL_MODELS)
+            initial_consensus = min(1.0 / float(max_models), 1.0)
+            
+            unit_id = f"{knowledge_unit['conversation_id']}_{knowledge_unit['hash'][:16]}"
+            
+            metadata = {
+                'hash': knowledge_unit['hash'],
+                'source_models': json.dumps([knowledge_unit['source_model']]),
+                'support_count': 1,
+                'consensus_score': initial_consensus,
+                'query_context': knowledge_unit['query_context'],
+                'conversation_id': knowledge_unit['conversation_id'],
+                'chunk_type': knowledge_unit['chunk_type'],
+                'created_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            
+            self.collection.add(
+                ids=[unit_id],
+                documents=[knowledge_unit['text']],
+                embeddings=[embedding],
+                metadatas=[metadata]
+            )
+            
+            return unit_id
+        except Exception as e:
+            print(f"ERROR: Failed to add knowledge unit: {e}")
+            raise RuntimeError(f"Failed to store knowledge unit: {e}") from e
     
     def update_knowledge_unit_consensus(
         self,
@@ -141,13 +152,18 @@ class VectorDatabase:
             return
         
         metadata = existing['metadatas'][0]
-        source_models = json.loads(metadata['source_models'])
+        try:
+            source_models = json.loads(metadata['source_models'])
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"Error deserializing source_models for unit {unit_id}: {e}")
+            source_models = []
         
         if new_source_model not in source_models:
             source_models.append(new_source_model)
             support_count = len(source_models)
             
-            consensus_score = min(support_count / 4.0, 1.0)
+            max_models = len(COUNCIL_MODELS)
+            consensus_score = min(support_count / float(max_models), 1.0)
             
             metadata['source_models'] = json.dumps(source_models)
             metadata['support_count'] = support_count
@@ -174,14 +190,20 @@ class VectorDatabase:
         Returns:
             List of knowledge units with metadata
         """
-        query_embedding = embedding_service.embed(query)
-        
-        results = self.collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=top_k
-        )
-        
-        if not results['ids'] or not results['ids'][0]:
+        try:
+            from .knowledge import normalize_text
+            normalized_query = normalize_text(query)
+            query_embedding = embedding_service.embed(normalized_query)
+            
+            results = self.collection.query(
+                query_embeddings=[query_embedding.tolist()],
+                n_results=top_k
+            )
+            
+            if not results['ids'] or not results['ids'][0]:
+                return []
+        except Exception as e:
+            print(f"ERROR: Failed to retrieve knowledge units: {e}")
             return []
         
         knowledge_units = []
@@ -196,6 +218,11 @@ class VectorDatabase:
                 CONSENSUS_WEIGHT * consensus_score
             )
             
+            try:
+                source_models = json.loads(metadata.get('source_models', '[]'))
+            except (json.JSONDecodeError, TypeError):
+                source_models = []
+            
             knowledge_units.append({
                 'id': results['ids'][0][i],
                 'text': results['documents'][0][i],
@@ -203,7 +230,7 @@ class VectorDatabase:
                 'consensus_score': consensus_score,
                 'combined_score': combined_score,
                 'support_count': metadata.get('support_count', 1),
-                'source_models': json.loads(metadata.get('source_models', '[]')),
+                'source_models': source_models,
                 'query_context': metadata.get('query_context', ''),
                 'created_at': metadata.get('created_at', '')
             })
@@ -219,32 +246,49 @@ class VectorDatabase:
         Returns:
             Stats dict
         """
-        total_count = self.collection.count()
-        
-        all_metadata = self.collection.get()
-        
-        consensus_counts = {
-            'single_source': 0,
-            'dual_source': 0,
-            'majority': 0,
-            'full_consensus': 0
-        }
-        
-        for metadata in all_metadata.get('metadatas', []):
-            support_count = metadata.get('support_count', 1)
-            if support_count == 1:
-                consensus_counts['single_source'] += 1
-            elif support_count == 2:
-                consensus_counts['dual_source'] += 1
-            elif support_count == 3:
-                consensus_counts['majority'] += 1
-            elif support_count >= 4:
-                consensus_counts['full_consensus'] += 1
-        
-        return {
-            'total_knowledge_units': total_count,
-            'consensus_distribution': consensus_counts
-        }
+        try:
+            total_count = self.collection.count()
+            
+            all_metadata = self.collection.get()
+            
+            consensus_counts = {
+                'single_source': 0,
+                'dual_source': 0,
+                'majority': 0,
+                'full_consensus': 0
+            }
+            
+            for metadata in all_metadata.get('metadatas', []):
+                try:
+                    support_count = int(metadata.get('support_count', 1))
+                except (ValueError, TypeError):
+                    support_count = 1
+                
+                if support_count == 1:
+                    consensus_counts['single_source'] += 1
+                elif support_count == 2:
+                    consensus_counts['dual_source'] += 1
+                elif support_count == 3:
+                    consensus_counts['majority'] += 1
+                elif support_count >= 4:
+                    consensus_counts['full_consensus'] += 1
+            
+            return {
+                'total_knowledge_units': total_count,
+                'consensus_distribution': consensus_counts
+            }
+        except Exception as e:
+            print(f"ERROR: Failed to get vector database stats: {e}")
+            return {
+                'total_knowledge_units': 0,
+                'consensus_distribution': {
+                    'single_source': 0,
+                    'dual_source': 0,
+                    'majority': 0,
+                    'full_consensus': 0
+                },
+                'error': str(e)
+            }
 
 
 vector_db = VectorDatabase()

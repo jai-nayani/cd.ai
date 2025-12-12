@@ -3,7 +3,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Dict, Any
 import uuid
 import json
@@ -33,6 +33,18 @@ class CreateConversationRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     """Request to send a message in a conversation."""
     content: str
+    
+    @field_validator('content')
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        """Validate message content."""
+        if not v or not v.strip():
+            raise ValueError("Message content cannot be empty")
+        
+        if len(v) > 50000:
+            raise ValueError("Message content exceeds maximum length of 50000 characters")
+        
+        return v.strip()
 
 
 class ConversationMetadata(BaseModel):
@@ -114,18 +126,26 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
         storage.update_conversation_title(conversation_id, title)
 
     # Run the 3-stage council process
-    stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
-        request.content,
-        conversation_id
-    )
+    try:
+        stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
+            request.content,
+            conversation_id
+        )
+    except Exception as e:
+        print(f"ERROR: Council process failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Council process failed: {str(e)}")
 
     # Add assistant message with all stages
-    storage.add_assistant_message(
-        conversation_id,
-        stage1_results,
-        stage2_results,
-        stage3_result
-    )
+    try:
+        storage.add_assistant_message(
+            conversation_id,
+            stage1_results,
+            stage2_results,
+            stage3_result
+        )
+    except Exception as e:
+        print(f"ERROR: Failed to save assistant message: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save response: {str(e)}")
 
     # Return the complete response with metadata
     return {
@@ -208,12 +228,17 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
 
             # Save complete assistant message
-            storage.add_assistant_message(
-                conversation_id,
-                stage1_results,
-                stage2_results,
-                stage3_result
-            )
+            try:
+                storage.add_assistant_message(
+                    conversation_id,
+                    stage1_results,
+                    stage2_results,
+                    stage3_result
+                )
+            except Exception as e:
+                print(f"ERROR: Failed to save assistant message: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save response: {str(e)}'})}\n\n"
+                return
 
             # Send completion event with RAG metrics
             completion_data = {'type': 'complete'}
@@ -223,6 +248,7 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 
         except Exception as e:
             # Send error event
+            print(f"ERROR: Unexpected error in message stream: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(

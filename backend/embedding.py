@@ -21,9 +21,13 @@ class EmbeddingService:
     def __init__(self):
         """Initialize the embedding model (lazy loading)."""
         if self._model is None:
-            print(f"Loading embedding model: {EMBEDDING_MODEL}")
-            self._model = SentenceTransformer(EMBEDDING_MODEL)
-            print("Embedding model loaded successfully")
+            try:
+                print(f"Loading embedding model: {EMBEDDING_MODEL}")
+                self._model = SentenceTransformer(EMBEDDING_MODEL)
+                print("Embedding model loaded successfully")
+            except Exception as e:
+                print(f"ERROR: Failed to load embedding model: {e}")
+                raise RuntimeError(f"Embedding service initialization failed: {e}") from e
     
     def embed(self, text: Union[str, List[str]]) -> Union[np.ndarray, List[np.ndarray]]:
         """
@@ -35,10 +39,17 @@ class EmbeddingService:
         Returns:
             Embedding(s) as numpy array(s)
         """
-        if isinstance(text, str):
-            return self._model.encode([text])[0]
-        else:
-            return self._model.encode(text)
+        if self._model is None:
+            raise RuntimeError("Embedding model not initialized")
+        
+        try:
+            if isinstance(text, str):
+                return self._model.encode([text])[0]
+            else:
+                return self._model.encode(text)
+        except Exception as e:
+            print(f"ERROR: Failed to embed text: {e}")
+            raise RuntimeError(f"Embedding failed: {e}") from e
     
     def similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         """
@@ -54,6 +65,11 @@ class EmbeddingService:
         dot_product = np.dot(embedding1, embedding2)
         norm1 = np.linalg.norm(embedding1)
         norm2 = np.linalg.norm(embedding2)
+        
+        if norm1 == 0.0 or norm2 == 0.0:
+            print("WARNING: Zero-norm embedding detected in similarity calculation")
+            return 0.0
+        
         return float(dot_product / (norm1 * norm2))
 
 
