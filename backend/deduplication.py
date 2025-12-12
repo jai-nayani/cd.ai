@@ -59,31 +59,43 @@ async def deduplicate_and_store(
     stored_ids = []
     
     for unit in knowledge_units:
-        metrics.total_generated += 1
-        
-        if vector_db.check_exact_duplicate(unit['hash']):
-            metrics.exact_duplicates += 1
-            continue
-        
-        embedding = embedding_service.embed(unit['text'])
-        
-        semantic_match = vector_db.check_semantic_duplicate(
-            embedding.tolist(),
-            threshold=SEMANTIC_SIMILARITY_THRESHOLD
-        )
-        
-        if semantic_match:
-            metrics.semantic_duplicates += 1
+        try:
+            metrics.total_generated += 1
             
-            vector_db.update_knowledge_unit_consensus(
-                semantic_match['id'],
-                unit['source_model']
+            if vector_db.check_exact_duplicate(unit['hash']):
+                metrics.exact_duplicates += 1
+                continue
+            
+            embedding = embedding_service.embed(unit['text'])
+            
+            semantic_match = vector_db.check_semantic_duplicate(
+                embedding.tolist(),
+                threshold=SEMANTIC_SIMILARITY_THRESHOLD
             )
-            stored_ids.append(semantic_match['id'])
-        else:
-            unit_id = vector_db.add_knowledge_unit(unit, embedding.tolist())
-            metrics.stored_new += 1
-            stored_ids.append(unit_id)
+            
+            if semantic_match:
+                metrics.semantic_duplicates += 1
+                
+                try:
+                    vector_db.update_knowledge_unit_consensus(
+                        semantic_match['id'],
+                        unit['source_model']
+                    )
+                    stored_ids.append(semantic_match['id'])
+                except Exception as e:
+                    print(f"ERROR: Failed to update consensus for unit {semantic_match['id']}: {e}")
+                    continue
+            else:
+                try:
+                    unit_id = vector_db.add_knowledge_unit(unit, embedding.tolist())
+                    metrics.stored_new += 1
+                    stored_ids.append(unit_id)
+                except Exception as e:
+                    print(f"ERROR: Failed to store knowledge unit: {e}")
+                    continue
+        except Exception as e:
+            print(f"ERROR: Failed to deduplicate unit: {e}")
+            continue
     
     return metrics, stored_ids
 
