@@ -24,3 +24,12 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Data directory for conversation storage
 DATA_DIR = "data/conversations"
+
+# RAG Configuration
+RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() == "true"
+VECTOR_DB_DIR = "data/vectordb"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # Fast, good quality
+SEMANTIC_SIMILARITY_THRESHOLD = 0.98  # High threshold for semantic deduplication
+CHUNK_SIZE = 200  # Target words per chunk (approximate)
+TOP_K_RETRIEVAL = 10  # Number of chunks to retrieve
+CONSENSUS_WEIGHT = 0.3  # Weight for consensus score in re-ranking (0.0-1.0)

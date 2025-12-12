@@ -11,6 +11,7 @@ import asyncio
 
 from . import storage
 from .council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
+from .config import RAG_ENABLED
 
 app = FastAPI(title="LLM Council API")
 
@@ -53,7 +54,18 @@ class Conversation(BaseModel):
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    return {"status": "ok", "service": "LLM Council API"}
+    return {"status": "ok", "service": "LLM Council API", "rag_enabled": RAG_ENABLED}
+
+
+@app.get("/api/rag/stats")
+async def get_rag_stats():
+    """Get RAG system statistics."""
+    if not RAG_ENABLED:
+        return {"enabled": False, "message": "RAG is disabled"}
+    
+    from .vectordb import vector_db
+    stats = vector_db.get_stats()
+    return {"enabled": True, **stats}
 
 
 @app.get("/api/conversations", response_model=List[ConversationMetadata])
@@ -103,7 +115,8 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
 
     # Run the 3-stage council process
     stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
-        request.content
+        request.content,
+        conversation_id
     )
 
     # Add assistant message with all stages
@@ -147,9 +160,22 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             if is_first_message:
                 title_task = asyncio.create_task(generate_conversation_title(request.content))
 
-            # Stage 1: Collect responses
+            # RAG: Retrieve relevant knowledge
+            retrieved_knowledge = []
+            rag_metrics = {}
+            if RAG_ENABLED:
+                from .vectordb import vector_db
+                from .deduplication import calculate_consensus_info
+                
+                yield f"data: {json.dumps({'type': 'rag_retrieval_start'})}\n\n"
+                retrieved_knowledge = vector_db.retrieve(request.content)
+                rag_metrics['retrieved_count'] = len(retrieved_knowledge)
+                rag_metrics['consensus_info'] = calculate_consensus_info(retrieved_knowledge)
+                yield f"data: {json.dumps({'type': 'rag_retrieval_complete', 'data': rag_metrics})}\n\n"
+
+            # Stage 1: Collect responses (with RAG context)
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            stage1_results = await stage1_collect_responses(request.content)
+            stage1_results = await stage1_collect_responses(request.content, retrieved_knowledge)
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
             # Stage 2: Collect rankings
@@ -162,6 +188,18 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
             stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
+
+            # RAG: Store new knowledge
+            if RAG_ENABLED:
+                from .knowledge import extract_knowledge_units
+                from .deduplication import deduplicate_and_store
+                
+                yield f"data: {json.dumps({'type': 'rag_storage_start'})}\n\n"
+                knowledge_units = extract_knowledge_units(stage1_results, request.content, conversation_id)
+                dedup_metrics, stored_ids = await deduplicate_and_store(knowledge_units)
+                rag_metrics['deduplication'] = dedup_metrics.to_dict()
+                rag_metrics['stored_ids_count'] = len(stored_ids)
+                yield f"data: {json.dumps({'type': 'rag_storage_complete', 'data': rag_metrics})}\n\n"
 
             # Wait for title generation if it was started
             if title_task:
@@ -177,8 +215,11 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 stage3_result
             )
 
-            # Send completion event
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            # Send completion event with RAG metrics
+            completion_data = {'type': 'complete'}
+            if RAG_ENABLED:
+                completion_data['rag_metrics'] = rag_metrics
+            yield f"data: {json.dumps(completion_data)}\n\n"
 
         except Exception as e:
             # Send error event
